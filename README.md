@@ -21,7 +21,7 @@ One command sets up a VLESS+Reality server on a fresh Ubuntu 24 box — built an
 ## Usage
 
 ```bash
-curl -O https://raw.githubusercontent.com/YOUR-USERNAME/YOUR-REPO/main/install.sh
+curl -O https://raw.githubusercontent.com/asazh20-sketch/vpn-installer/main/install.sh
 sudo bash install.sh
 ```
 
