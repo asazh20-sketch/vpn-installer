@@ -42,8 +42,8 @@ echo ""
 # ---------- Step 3: Ask for masking domain (SNI) ----------
 echo "Reality needs a real website to disguise your traffic as (this site is never actually"
 echo "proxied, it's just used for the TLS handshake fingerprint)."
-read -p "Enter destination site [default: www.microsoft.com]: " USER_DEST
-DEST=${USER_DEST:-www.microsoft.com}
+read -p "Enter destination site [default: www.cloudflare.com:443]: " USER_DEST
+DEST=${USER_DEST:-www.cloudflare.com:443}
 SNI=$(echo "$DEST" | cut -d: -f1)
 echo -e "${GREEN}Using masking site: $DEST (SNI: $SNI)${NC}"
 echo ""
@@ -58,9 +58,17 @@ echo ""
 echo -e "${YELLOW}[3/7] Generating UUID, key pair, and short ID...${NC}"
 UUID=$(xray uuid)
 KEY_OUTPUT=$(xray x25519)
-PRIVATE_KEY=$(echo "$KEY_OUTPUT" | grep -i "Private" | awk '{print $3}')
-PUBLIC_KEY=$(echo "$KEY_OUTPUT" | grep -i "Public" | awk '{print $3}')
+PRIVATE_KEY=$(echo "$KEY_OUTPUT" | grep -i "Private" | awk '{print $NF}')
+PUBLIC_KEY=$(echo "$KEY_OUTPUT" | grep -i "Public" | awk '{print $NF}')
 SHORT_ID=$(openssl rand -hex 8)
+
+if [ -z "$PRIVATE_KEY" ] || [ -z "$PUBLIC_KEY" ]; then
+  echo -e "${RED}Failed to generate keys. 'xray x25519' output format may have changed.${NC}"
+  echo -e "${RED}Raw output was:${NC}"
+  echo "$KEY_OUTPUT"
+  exit 1
+fi
+
 echo -e "${GREEN}UUID, keys, and short ID generated.${NC}"
 echo ""
 
