@@ -47,6 +47,24 @@ apt install -y curl wget unzip jq > /dev/null 2>&1
 echo -e "${GREEN}System updated.${NC}"
 echo ""
 
+# ---------- Enable BBR congestion control ----------
+echo -e "${YELLOW}Enabling BBR congestion control...${NC}"
+if ! grep -q "net.core.default_qdisc=fq" /etc/sysctl.conf 2>/dev/null; then
+  echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf
+fi
+if ! grep -q "net.ipv4.tcp_congestion_control=bbr" /etc/sysctl.conf 2>/dev/null; then
+  echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.conf
+fi
+sysctl -p > /dev/null 2>&1
+
+CURRENT_CC=$(sysctl -n net.ipv4.tcp_congestion_control)
+if [ "$CURRENT_CC" = "bbr" ]; then
+  echo -e "${GREEN}BBR is active.${NC}"
+else
+  echo -e "${YELLOW}BBR did not activate (current: $CURRENT_CC). This won't stop the install, but throughput may be lower than optimal.${NC}"
+fi
+echo ""
+
 # ---------- Step 2: Fixed port and masking site (no prompts) ----------
 PORT=443
 DEST="www.cloudflare.com:443"
@@ -141,13 +159,24 @@ echo -e "${GREEN}Done. (Remember to also open port $PORT in your Lightsail netwo
 echo ""
 
 # ---------- Step 8: Start Xray ----------
+# ---------- Step 8: Start Xray ----------
 echo -e "${YELLOW}[6/6] Starting Xray service...${NC}"
+
+# Make Xray auto-restart if it ever crashes
+mkdir -p /etc/systemd/system/xray.service.d
+cat > /etc/systemd/system/xray.service.d/restart-on-failure.conf <<EOF
+[Service]
+Restart=on-failure
+RestartSec=5s
+EOF
+systemctl daemon-reload
+
 systemctl enable xray > /dev/null 2>&1
 systemctl restart xray
 sleep 2
 
 if systemctl is-active --quiet xray; then
-  echo -e "${GREEN}Xray is running.${NC}"
+  echo -e "${GREEN}Xray is running (auto-restart enabled if it ever crashes).${NC}"
 else
   echo -e "${RED}Xray failed to start. Check logs with: journalctl -u xray -e${NC}"
   exit 1
