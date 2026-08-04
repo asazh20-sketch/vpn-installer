@@ -26,6 +26,18 @@ if [ "$EUID" -ne 0 ]; then
   exit 1
 fi
 
+# ---------- Ask for DuckDNS domain and token ----------
+read -p "Enter your DuckDNS domain (just the subdomain, e.g. 'myserver' for myserver.duckdns.org): " DUCKDNS_DOMAIN
+read -p "Enter your DuckDNS Token: " DUCKDNS_TOKEN
+
+if [ -z "$DUCKDNS_DOMAIN" ] || [ -z "$DUCKDNS_TOKEN" ]; then
+  echo -e "${RED}DuckDNS domain and token are both required. Exiting.${NC}"
+  exit 1
+fi
+
+echo -e "${GREEN}Using DuckDNS domain: ${DUCKDNS_DOMAIN}.duckdns.org${NC}"
+echo ""
+
 # ---------- Step 1: Update Ubuntu ----------
 echo -e "${YELLOW}[1/6] Updating Ubuntu packages...${NC}"
 export DEBIAN_FRONTEND=noninteractive
@@ -147,8 +159,75 @@ PUBLIC_IP=$(curl -s -4 https://api.ipify.org || curl -s -4 ifconfig.me)
 echo -e "${GREEN}Public IP: $PUBLIC_IP${NC}"
 echo ""
 
+# ---------- Step 10: Set up DuckDNS ----------
+echo -e "${YELLOW}Updating DuckDNS record...${NC}"
+mkdir -p /etc/duckdns
+cat > /etc/duckdns/duck.sh <<EOF
+#!/bin/bash
+curl -s "https://www.duckdns.org/update?domains=${DUCKDNS_DOMAIN}&token=${DUCKDNS_TOKEN}&ip=" > /etc/duckdns/duck.log 2>&1
+EOF
+chmod +x /etc/duckdns/duck.sh
+/etc/duckdns/duck.sh
+
+DUCKDNS_RESULT=$(cat /etc/duckdns/duck.log)
+if [ "$DUCKDNS_RESULT" != "OK" ]; then
+  echo -e "${RED}DuckDNS update failed. Response: $DUCKDNS_RESULT${NC}"
+  echo -e "${RED}Double check your domain and token are correct.${NC}"
+  exit 1
+fi
+
+# ---------- Step 11: Boot-time DuckDNS retry script ----------
+# On every boot: wait 20s for networking, then retry the update every 5s, up to 10 attempts.
+cat > /etc/duckdns/duck-boot.sh <<'EOF'
+#!/bin/bash
+LOGFILE="/etc/duckdns/duck-boot.log"
+sleep 20
+
+for i in $(seq 1 10); do
+  /etc/duckdns/duck.sh
+  RESULT=$(cat /etc/duckdns/duck.log)
+  if [ "$RESULT" = "OK" ]; then
+    echo "$(date): DuckDNS updated successfully on attempt $i" >> "$LOGFILE"
+    exit 0
+  fi
+  echo "$(date): Attempt $i failed (response: $RESULT), retrying in 5s..." >> "$LOGFILE"
+  sleep 5
+done
+
+echo "$(date): DuckDNS update failed after 10 attempts" >> "$LOGFILE"
+exit 1
+EOF
+chmod +x /etc/duckdns/duck-boot.sh
+
+# systemd service to run the boot script once networking is up
+cat > /etc/systemd/system/duckdns-boot.service <<EOF
+[Unit]
+Description=DuckDNS IP update on boot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/etc/duckdns/duck-boot.sh
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable duckdns-boot.service > /dev/null 2>&1
+
+# Ongoing check once the server has been up for a while: every 1 hour
+( crontab -l 2>/dev/null | grep -v duck.sh ; echo "0 * * * * /etc/duckdns/duck.sh >/dev/null 2>&1" ) | crontab -
+
+SERVER_ADDRESS="${DUCKDNS_DOMAIN}.duckdns.org"
+echo -e "${GREEN}DuckDNS domain is live: $SERVER_ADDRESS${NC}"
+echo -e "${GREEN}On every reboot: waits 20s, then retries every 5s (up to 10 tries) until it updates.${NC}"
+echo -e "${GREEN}Ongoing check: every 1 hour.${NC}"
+echo ""
+
 # ---------- Build client link ----------
-VLESS_LINK="vless://${UUID}@${PUBLIC_IP}:${PORT}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${SNI}&fp=chrome&pbk=${PUBLIC_KEY}&sid=${SHORT_ID}&type=tcp&headerType=none#VLESS-Reality-${PUBLIC_IP}"
+VLESS_LINK="vless://${UUID}@${SERVER_ADDRESS}:${PORT}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${SNI}&fp=chrome&pbk=${PUBLIC_KEY}&sid=${SHORT_ID}&type=tcp&headerType=none#VLESS-Reality-${SERVER_ADDRESS}"
 
 # ---------- Final summary ----------
 echo -e "${CYAN}=============================================${NC}"
@@ -156,6 +235,7 @@ echo -e "${CYAN}          INSTALLATION COMPLETE!${NC}"
 echo -e "${CYAN}=============================================${NC}"
 echo ""
 echo -e "${GREEN}Server IP     :${NC} $PUBLIC_IP"
+echo -e "${GREEN}DuckDNS       :${NC} $SERVER_ADDRESS"
 echo -e "${GREEN}Port          :${NC} $PORT"
 echo -e "${GREEN}UUID          :${NC} $UUID"
 echo -e "${GREEN}Public Key    :${NC} $PUBLIC_KEY"
@@ -173,6 +253,7 @@ echo ""
 # Save to file for later reference
 cat > /root/vless-client-info.txt <<EOF
 Server IP     : $PUBLIC_IP
+DuckDNS       : $SERVER_ADDRESS
 Port          : $PORT
 UUID          : $UUID
 Public Key    : $PUBLIC_KEY
