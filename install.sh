@@ -27,35 +27,30 @@ if [ "$EUID" -ne 0 ]; then
 fi
 
 # ---------- Step 1: Update Ubuntu ----------
-echo -e "${YELLOW}[1/7] Updating Ubuntu packages...${NC}"
-apt update -y && apt upgrade -y
+echo -e "${YELLOW}[1/6] Updating Ubuntu packages...${NC}"
+export DEBIAN_FRONTEND=noninteractive
+apt update -y
+apt upgrade -y -o Dpkg::Options::="--force-confold"
 apt install -y curl wget unzip jq qrencode > /dev/null 2>&1
 echo -e "${GREEN}System updated.${NC}"
 echo ""
 
-# ---------- Step 2: Ask for port ----------
-read -p "Enter the port you want VLESS+Reality to run on [default: 443]: " USER_PORT
-PORT=${USER_PORT:-443}
-echo -e "${GREEN}Using port: $PORT${NC}"
-echo ""
-
-# ---------- Step 3: Ask for masking domain (SNI) ----------
-echo "Reality needs a real website to disguise your traffic as (this site is never actually"
-echo "proxied, it's just used for the TLS handshake fingerprint)."
-read -p "Enter destination site [default: www.cloudflare.com:443]: " USER_DEST
-DEST=${USER_DEST:-www.cloudflare.com:443}
+# ---------- Step 2: Fixed port and masking site (no prompts) ----------
+PORT=443
+DEST="www.cloudflare.com:443"
 SNI=$(echo "$DEST" | cut -d: -f1)
+echo -e "${GREEN}Using port: $PORT${NC}"
 echo -e "${GREEN}Using masking site: $DEST (SNI: $SNI)${NC}"
 echo ""
 
 # ---------- Step 4: Install Xray-core ----------
-echo -e "${YELLOW}[2/7] Installing Xray-core...${NC}"
+echo -e "${YELLOW}[2/6] Installing Xray-core...${NC}"
 bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
 echo -e "${GREEN}Xray installed.${NC}"
 echo ""
 
 # ---------- Step 5: Generate UUID, keys, short ID ----------
-echo -e "${YELLOW}[3/7] Generating UUID, key pair, and short ID...${NC}"
+echo -e "${YELLOW}[3/6] Generating UUID, key pair, and short ID...${NC}"
 UUID=$(xray uuid)
 KEY_OUTPUT=$(xray x25519)
 PRIVATE_KEY=$(echo "$KEY_OUTPUT" | grep -i "Private" | awk '{print $NF}')
@@ -73,7 +68,7 @@ echo -e "${GREEN}UUID, keys, and short ID generated.${NC}"
 echo ""
 
 # ---------- Step 6: Write Xray config ----------
-echo -e "${YELLOW}[4/7] Writing Xray configuration...${NC}"
+echo -e "${YELLOW}[4/6] Writing Xray configuration...${NC}"
 mkdir -p /usr/local/etc/xray
 
 cat > "$XRAY_CONFIG" <<EOF
@@ -126,7 +121,7 @@ echo -e "${GREEN}Config written to $XRAY_CONFIG${NC}"
 echo ""
 
 # ---------- Step 7: Firewall ----------
-echo -e "${YELLOW}[5/7] Opening port $PORT in firewall (if ufw is active)...${NC}"
+echo -e "${YELLOW}[5/6] Opening port $PORT in firewall (if ufw is active)...${NC}"
 if command -v ufw > /dev/null 2>&1; then
   ufw allow "$PORT"/tcp > /dev/null 2>&1 || true
 fi
@@ -134,7 +129,7 @@ echo -e "${GREEN}Done. (Remember to also open port $PORT in your Lightsail netwo
 echo ""
 
 # ---------- Step 8: Start Xray ----------
-echo -e "${YELLOW}[6/7] Starting Xray service...${NC}"
+echo -e "${YELLOW}[6/6] Starting Xray service...${NC}"
 systemctl enable xray > /dev/null 2>&1
 systemctl restart xray
 sleep 2
@@ -148,7 +143,6 @@ fi
 echo ""
 
 # ---------- Step 9: Get server public IP ----------
-echo -e "${YELLOW}[7/7] Fetching server public IP...${NC}"
 PUBLIC_IP=$(curl -s -4 https://api.ipify.org || curl -s -4 ifconfig.me)
 echo -e "${GREEN}Public IP: $PUBLIC_IP${NC}"
 echo ""
