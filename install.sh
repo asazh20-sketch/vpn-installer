@@ -31,7 +31,7 @@ echo -e "${YELLOW}[1/6] Updating Ubuntu packages...${NC}"
 export DEBIAN_FRONTEND=noninteractive
 apt update -y
 apt upgrade -y -o Dpkg::Options::="--force-confold"
-apt install -y curl wget unzip jq qrencode > /dev/null 2>&1
+apt install -y curl wget unzip jq > /dev/null 2>&1
 echo -e "${GREEN}System updated.${NC}"
 echo ""
 
@@ -189,11 +189,6 @@ EOF
 echo -e "${CYAN}This info was also saved to /root/vless-client-info.txt${NC}"
 echo ""
 
-# QR code if qrencode installed
-if command -v qrencode > /dev/null 2>&1; then
-  echo -e "${YELLOW}Scan this QR code with your client app:${NC}"
-  qrencode -t ANSIUTF8 "$VLESS_LINK"
-fi
-
+sudo cat /root/vless-client-info.txt
 echo ""
 echo -e "${GREEN}All done. Enjoy!${NC}"
