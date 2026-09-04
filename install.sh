@@ -67,7 +67,7 @@ echo ""
 
 # ---------- Step 2: Fixed port and masking site (no prompts) ----------
 PORT=443
-DEST="www.microsoft.com:443"
+DEST="www.apple.com:443"
 SNI=$(echo "$DEST" | cut -d: -f1)
 echo -e "${GREEN}Using port: $PORT${NC}"
 echo -e "${GREEN}Using masking site: $DEST (SNI: $SNI)${NC}"
