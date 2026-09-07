@@ -303,7 +303,6 @@ cat /root/vless-client-info.txt
 echo ""
 echo -e "${GREEN}All done. Enjoy!${NC}"
 echo ""
-echo -e "${YELLOW}The server will reboot in 15 seconds to make sure all system and kernel updates take effect.${NC}"
+echo -e "${YELLOW}Please Reboot The server to make sure all system and kernel updates take effect.${NC}"
 echo -e "${YELLOW}Your client info above is also saved in /root/vless-client-info.txt, so you can check it again after reboot.${NC}"
-sleep 15
-reboot
+
