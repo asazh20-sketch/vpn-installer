@@ -307,16 +307,20 @@ echo -e "${YELLOW}Please Reboot The server to make sure all system and kernel up
 echo -e "${YELLOW}Your client info above is also saved in /root/vless-client-info.txt, so you can check it again after reboot.${NC}"
 
 # ============================================================
-# OPTIONAL: CLOUDFLARE WARP INSTALLATION
+# OPTIONAL: CLOUDFLARE WARP FOR XRAY OUTBOUND ONLY
+#
+# VLESS -> Xray -> WARP SOCKS5 -> Internet
+#
+# VPS SSH / DuckDNS / system traffic remain on normal route.
 # ============================================================
 
 echo ""
 echo -e "${CYAN}=============================================${NC}"
-echo -e "${CYAN}       OPTIONAL: CLOUDFLARE WARP${NC}"
+echo -e "${CYAN}     OPTIONAL: CLOUDFLARE WARP OUTBOUND${NC}"
 echo -e "${CYAN}=============================================${NC}"
 echo ""
 
-read -r -p "Do you want to install Cloudflare WARP? [Y/N]: " INSTALL_WARP
+read -r -p "Do you want to install WARP for VLESS browsing traffic? [Y/N]: " INSTALL_WARP
 
 case "$INSTALL_WARP" in
 
@@ -327,137 +331,281 @@ case "$INSTALL_WARP" in
         echo ""
 
         # ----------------------------------------------------
-        # Install WARP if not already installed
+        # Install prerequisites
         # ----------------------------------------------------
 
-        if command -v warp-cli >/dev/null 2>&1; then
+        apt-get update -y
+        apt-get install -y curl gnupg ca-certificates
 
-            echo -e "${GREEN}Cloudflare WARP is already installed.${NC}"
+        # ----------------------------------------------------
+        # Install Cloudflare WARP repository
+        # ----------------------------------------------------
 
-        else
+        echo -e "${YELLOW}Adding Cloudflare WARP repository...${NC}"
 
-            echo -e "${YELLOW}Installing required packages...${NC}"
+        mkdir -p /usr/share/keyrings
 
-            apt install -y curl gnupg ca-certificates
+        # Download key first instead of using a multiline pipe.
+        # This avoids shell paste/parsing problems.
+        curl -fsSL \
+            https://pkg.cloudflareclient.com/pubkey.gpg \
+            -o /tmp/cloudflare-warp-key.gpg
 
-            echo -e "${YELLOW}Adding Cloudflare WARP repository...${NC}"
+        gpg --yes --dearmor \
+            -o /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg \
+            /tmp/cloudflare-warp-key.gpg
 
-            curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg \
-                | gpg --dearmor \
-                -o /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
+        rm -f /tmp/cloudflare-warp-key.gpg
 
-            . /etc/os-release
+        echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ noble main" \
+            > /etc/apt/sources.list.d/cloudflare-client.list
 
-            echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ ${VERSION_CODENAME} main" \
-                > /etc/apt/sources.list.d/cloudflare-client.list
+        apt-get update -y
 
-            echo -e "${YELLOW}Updating package list...${NC}"
+        # ----------------------------------------------------
+        # Install WARP
+        # ----------------------------------------------------
 
-            apt update -y
-
-            echo -e "${YELLOW}Installing Cloudflare WARP...${NC}"
-
-            apt install -y cloudflare-warp
-
-            echo -e "${GREEN}Cloudflare WARP installed successfully.${NC}"
-
+        if ! command -v warp-cli >/dev/null 2>&1; then
+            apt-get install -y cloudflare-warp
         fi
 
+        echo -e "${GREEN}Cloudflare WARP installed.${NC}"
         echo ""
 
         # ----------------------------------------------------
-        # Start WARP service
+        # Enable WARP service
         # ----------------------------------------------------
-
-        echo -e "${YELLOW}Starting WARP service...${NC}"
 
         systemctl enable warp-svc >/dev/null 2>&1
         systemctl start warp-svc
 
         sleep 3
 
-        if systemctl is-active --quiet warp-svc; then
-            echo -e "${GREEN}WARP service is running.${NC}"
-        else
+        if ! systemctl is-active --quiet warp-svc; then
             echo -e "${RED}WARP service failed to start.${NC}"
-            echo ""
             systemctl status warp-svc --no-pager
             exit 1
         fi
 
+        echo -e "${GREEN}WARP service is running.${NC}"
         echo ""
 
         # ----------------------------------------------------
         # Register WARP
         # ----------------------------------------------------
 
-        echo -e "${YELLOW}Checking WARP registration...${NC}"
+        echo -e "${YELLOW}Registering WARP...${NC}"
 
-        if warp-cli registration show >/dev/null 2>&1; then
-
-            echo -e "${GREEN}WARP is already registered.${NC}"
-
-        else
-
-            echo -e "${YELLOW}Registering this VPS with Cloudflare WARP...${NC}"
-
-            warp-cli registration new
-
-            echo -e "${GREEN}WARP registration completed.${NC}"
-
+        if ! warp-cli --accept-tos registration show >/dev/null 2>&1; then
+            warp-cli --accept-tos registration new
         fi
 
+        echo -e "${GREEN}WARP registration completed.${NC}"
+        echo ""
+
+        # ----------------------------------------------------
+        # IMPORTANT:
+        # Use WARP LOCAL PROXY mode.
+        #
+        # This does NOT replace the VPS default route.
+        # Therefore SSH and VPS connectivity remain normal.
+        # ----------------------------------------------------
+
+        echo -e "${YELLOW}Configuring WARP local proxy mode...${NC}"
+
+        warp-cli --accept-tos tunnel protocol set MASQUE >/dev/null 2>&1 || true
+
+        warp-cli --accept-tos mode proxy
+
+        # Default WARP proxy port is 40000.
+        WARP_PROXY_PORT=40000
+
+        warp-cli --accept-tos proxy port "$WARP_PROXY_PORT" >/dev/null 2>&1 || true
+
+        echo -e "${GREEN}WARP proxy mode configured.${NC}"
         echo ""
 
         # ----------------------------------------------------
         # Connect WARP
         # ----------------------------------------------------
 
-        echo -e "${YELLOW}Connecting to Cloudflare WARP...${NC}"
+        echo -e "${YELLOW}Connecting WARP...${NC}"
 
-        warp-cli connect
+        warp-cli --accept-tos connect
 
-        sleep 5
+        # Give WARP time to establish the tunnel.
+        sleep 8
+
+        WARP_STATUS="$(warp-cli --accept-tos status 2>/dev/null || true)"
 
         echo ""
-
-        # ----------------------------------------------------
-        # Check WARP status
-        # ----------------------------------------------------
-
-        echo -e "${YELLOW}Checking WARP status...${NC}"
-        echo ""
-
-        WARP_STATUS="$(warp-cli status 2>/dev/null || true)"
-
         echo "$WARP_STATUS"
+        echo ""
 
+        if ! echo "$WARP_STATUS" | grep -qi "Connected"; then
+
+            echo -e "${RED}WARP failed to connect.${NC}"
+            echo ""
+            echo -e "${YELLOW}WARP diagnostics:${NC}"
+            warp-cli --accept-tos status || true
+            echo ""
+            echo -e "${YELLOW}WARP service:${NC}"
+            systemctl status warp-svc --no-pager || true
+            echo ""
+
+            exit 1
+        fi
+
+        echo -e "${GREEN}WARP is connected.${NC}"
         echo ""
 
         # ----------------------------------------------------
-        # Final status
+        # Verify WARP SOCKS5 proxy
         # ----------------------------------------------------
 
-        if echo "$WARP_STATUS" | grep -qi "Connected"; then
+        echo -e "${YELLOW}Testing WARP proxy...${NC}"
 
-            echo -e "${GREEN}=============================================${NC}"
-            echo -e "${GREEN}       CLOUDFLARE WARP IS RUNNING${NC}"
-            echo -e "${GREEN}=============================================${NC}"
+        WARP_IP=$(curl -4 \
+            --silent \
+            --show-error \
+            --max-time 15 \
+            --proxy "socks5h://127.0.0.1:${WARP_PROXY_PORT}" \
+            https://api.ipify.org || true)
 
-        else
+        if [ -z "$WARP_IP" ]; then
 
-            echo -e "${RED}=============================================${NC}"
-            echo -e "${RED}       CLOUDFLARE WARP IS NOT CONNECTED${NC}"
-            echo -e "${RED}=============================================${NC}"
-
+            echo -e "${RED}WARP proxy test failed.${NC}"
             echo ""
-            echo -e "${YELLOW}Run the following commands to diagnose:${NC}"
+            echo "Check:"
+            echo "  warp-cli settings"
+            echo "  warp-cli status"
+            echo "  ss -lntp | grep ${WARP_PROXY_PORT}"
             echo ""
-            echo "warp-cli status"
-            echo "systemctl status warp-svc"
-            echo ""
+            exit 1
 
         fi
+
+        echo -e "${GREEN}WARP proxy is working.${NC}"
+        echo -e "${GREEN}WARP exit IP: ${WARP_IP}${NC}"
+        echo ""
+
+        # ----------------------------------------------------
+        # IMPORTANT:
+        # Replace Xray's normal freedom outbound with a SOCKS
+        # outbound pointing to the local WARP proxy.
+        #
+        # This means ONLY Xray traffic uses WARP.
+        # ----------------------------------------------------
+
+        echo -e "${YELLOW}Configuring Xray to use WARP...${NC}"
+
+        cp "$XRAY_CONFIG" "${XRAY_CONFIG}.before-warp"
+
+        jq \
+          --arg port "$WARP_PROXY_PORT" \
+          '
+          .outbounds = [
+            {
+              "protocol": "socks",
+              "settings": {
+                "servers": [
+                  {
+                    "address": "127.0.0.1",
+                    "port": ($port | tonumber)
+                  }
+                ]
+              },
+              "tag": "warp"
+            }
+          ]
+          ' "$XRAY_CONFIG" > "${XRAY_CONFIG}.tmp"
+
+        mv "${XRAY_CONFIG}.tmp" "$XRAY_CONFIG"
+
+        # ----------------------------------------------------
+        # Validate Xray configuration
+        # ----------------------------------------------------
+
+        echo -e "${YELLOW}Validating Xray configuration...${NC}"
+
+        if ! xray run -test -config "$XRAY_CONFIG" >/tmp/xray-config-test.log 2>&1; then
+
+            echo -e "${RED}Xray configuration validation failed.${NC}"
+            echo ""
+
+            cat /tmp/xray-config-test.log
+
+            echo ""
+            echo -e "${YELLOW}Restoring previous Xray configuration...${NC}"
+
+            cp "${XRAY_CONFIG}.before-warp" "$XRAY_CONFIG"
+
+            systemctl restart xray
+
+            exit 1
+        fi
+
+        echo -e "${GREEN}Xray configuration is valid.${NC}"
+        echo ""
+
+        # ----------------------------------------------------
+        # Restart Xray
+        # ----------------------------------------------------
+
+        systemctl restart xray
+
+        sleep 3
+
+        if systemctl is-active --quiet xray; then
+            echo -e "${GREEN}Xray is running with WARP outbound.${NC}"
+        else
+
+            echo -e "${RED}Xray failed after WARP configuration.${NC}"
+            echo ""
+            echo -e "${YELLOW}Restoring previous configuration...${NC}"
+
+            cp "${XRAY_CONFIG}.before-warp" "$XRAY_CONFIG"
+            systemctl restart xray
+
+            echo -e "${GREEN}Previous Xray configuration restored.${NC}"
+
+            exit 1
+        fi
+
+        echo ""
+
+        # ----------------------------------------------------
+        # Verify VPS normal public IP is still reachable
+        # ----------------------------------------------------
+
+        NORMAL_IP=$(curl -4 \
+            --silent \
+            --show-error \
+            --max-time 10 \
+            https://api.ipify.org || true)
+
+        echo -e "${GREEN}VPS normal public IP: ${NORMAL_IP}${NC}"
+        echo -e "${GREEN}WARP proxy exit IP  : ${WARP_IP}${NC}"
+        echo ""
+
+        # ----------------------------------------------------
+        # Final WARP information
+        # ----------------------------------------------------
+
+        echo -e "${CYAN}=============================================${NC}"
+        echo -e "${CYAN}       WARP + XRAY CONFIGURATION COMPLETE${NC}"
+        echo -e "${CYAN}=============================================${NC}"
+        echo ""
+
+        echo -e "${GREEN}WARP status       : CONNECTED${NC}"
+        echo -e "${GREEN}WARP proxy        : 127.0.0.1:${WARP_PROXY_PORT}${NC}"
+        echo -e "${GREEN}WARP exit IP      : ${WARP_IP}${NC}"
+        echo -e "${GREEN}VPS public IP     : ${NORMAL_IP}${NC}"
+        echo ""
+        echo -e "${GREEN}VLESS traffic     : Xray -> WARP -> Internet${NC}"
+        echo -e "${GREEN}SSH/system traffic: Normal VPS route${NC}"
+        echo ""
 
         ;;
 
@@ -465,7 +613,7 @@ case "$INSTALL_WARP" in
 
         echo ""
         echo -e "${GREEN}WARP installation skipped.${NC}"
-        echo -e "${GREEN}VLESS installation is complete.${NC}"
+        echo -e "${GREEN}VLESS remains configured normally.${NC}"
         echo ""
         exit 0
         ;;
@@ -482,6 +630,6 @@ esac
 
 echo ""
 echo -e "${GREEN}=============================================${NC}"
-echo -e "${GREEN}          INSTALLATION FINISHED${NC}"
+echo -e "${GREEN}             SETUP FINISHED${NC}"
 echo -e "${GREEN}=============================================${NC}"
 echo ""
