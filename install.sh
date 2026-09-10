@@ -962,3 +962,28 @@ echo -e "${GREEN}=============================================${NC}"
 echo -e "${GREEN}             SETUP FINISHED${NC}"
 echo -e "${GREEN}=============================================${NC}"
 echo ""
+
+
+echo -e "${CYAN}================ CLIENT LINKS ================${NC}"
+echo ""
+
+echo -e "${YELLOW}VLESS + Reality (TCP 443):${NC}"
+echo "$VLESS_LINK"
+echo ""
+
+if [[ "$INSTALL_XHTTP" =~ ^[Yy]$ ]] && [ -n "$XHTTP_LINK" ]; then
+    echo -e "${YELLOW}VLESS + Reality + XHTTP (TCP 8443):${NC}"
+    echo "$XHTTP_LINK"
+    echo ""
+fi
+
+if [[ "$INSTALL_HYSTERIA" =~ ^[Yy]$ ]] && [ -n "$HY2_LINK" ]; then
+    echo -e "${YELLOW}Hysteria 2 (UDP 8443):${NC}"
+    echo "$HY2_LINK"
+    echo ""
+fi
+
+echo -e "${GREEN}=============================================${NC}"
+echo -e "${GREEN}              SETUP COMPLETE${NC}"
+echo -e "${GREEN}=============================================${NC}"
+echo ""
