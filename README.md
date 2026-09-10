@@ -17,7 +17,8 @@ One command sets up a VLESS+Reality server on a fresh Ubuntu 24 box — built an
 
 - Ubuntu 24.04 VPS (Lightsail, EC2, DigitalOcean, whatever)
 - Root access
-- ports 443/8443
+- ports 443/8443 (TCP)
+- ports 8443 (UDP)
 
 ## Usage
 
