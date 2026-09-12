@@ -505,8 +505,10 @@ case "$INSTALL_HYSTERIA" in
         echo -e "${YELLOW}TCP port 80 must be open in your VPS/Lightsail firewall.${NC}"
         echo ""
 
-        certbot certonly             --standalone             --non-interactive             --agree-tos             --register-unsafely-without-email             -d "$SERVER_ADDRESS"
-
+        certbot certonly \
+            --standalone \
+            -d "$SERVER_ADDRESS"
+            
         echo -e "${GREEN}TLS certificate obtained successfully.${NC}"
         echo ""
 
