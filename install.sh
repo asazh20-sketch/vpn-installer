@@ -506,8 +506,11 @@ case "$INSTALL_HYSTERIA" in
         echo ""
 
            certbot certonly \
-            --standalone \
-            -d "$SERVER_ADDRESS"
+          --standalone \
+          --non-interactive \
+          --agree-tos \
+          --register-unsafely-without-email \
+          -d "$SERVER_ADDRESS"
 
             
         echo -e "${GREEN}TLS certificate obtained successfully.${NC}"
