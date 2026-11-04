@@ -52,7 +52,7 @@ EOF
 sysctl -p >/dev/null 2>&1 || true
 
 echo -e "${CYAN}=== Installing Xray-core ===${NC}"
-retry 5 5 bash -c "bash <(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh) --version latest"
+retry 5 5 bash -c "bash <(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)"
 
 mkdir -p /etc/systemd/system/xray.service.d
 cat > /etc/systemd/system/xray.service.d/restart-on-failure.conf <<EOF
