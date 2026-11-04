@@ -1,10 +1,12 @@
 #!/bin/bash
-# Multi-Protocol VPN Installer for Ubuntu 24 (Amazon Lightsail or any VPS)
-# Installs automatically: VLESS+Reality (TCP) -> VLESS+Reality+XHTTP -> Trojan (TLS) -> Hysteria2
-# WARP is the only optional step (Y/N).
+#
+# VLESS + Reality Installer for Ubuntu 24 (Amazon Lightsail or any VPS)
+# Run as root: sudo bash install.sh
+#
 
 set -e
 
+# ---------- Colors ----------
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 RED='\033[0;31m'
@@ -13,76 +15,72 @@ NC='\033[0m'
 
 XRAY_CONFIG="/usr/local/etc/xray/config.json"
 
+echo -e "${CYAN}=============================================${NC}"
+echo -e "${CYAN}   VLESS + Reality Auto Installer (Ubuntu 24)${NC}"
+echo -e "${CYAN}=============================================${NC}"
+echo ""
+
+# ---------- Must be root ----------
 if [ "$EUID" -ne 0 ]; then
-    echo -e "${RED}Please run as root (sudo).${NC}"
-    exit 1
+  echo -e "${RED}Please run this script as root (use: sudo bash install.sh)${NC}"
+  exit 1
 fi
 
-retry() {
-    local max_attempts="$1"; shift
-    local delay="$1"; shift
-    local attempt=1
-    until "$@"; do
-        if [ "$attempt" -ge "$max_attempts" ]; then
-            echo -e "${RED}Command failed after $attempt attempts: $*${NC}"
-            return 1
-        fi
-        echo -e "${YELLOW}Attempt $attempt failed. Retrying in ${delay}s...${NC}"
-        attempt=$((attempt + 1))
-        sleep "$delay"
-    done
-}
+# ---------- Ask for DuckDNS domain and token ----------
+read -p "Enter your DuckDNS domain (just the subdomain, e.g. 'myserver' for myserver.duckdns.org): " DUCKDNS_DOMAIN
+read -p "Enter your DuckDNS Token: " DUCKDNS_TOKEN
 
-echo -e "${CYAN}=== DuckDNS Setup ===${NC}"
-read -r -p "Enter your DuckDNS domain (without .duckdns.org): " DUCKDNS_DOMAIN
-read -r -p "Enter your DuckDNS token: " DUCKDNS_TOKEN
-SERVER_ADDRESS="${DUCKDNS_DOMAIN}.duckdns.org"
+if [ -z "$DUCKDNS_DOMAIN" ] || [ -z "$DUCKDNS_TOKEN" ]; then
+  echo -e "${RED}DuckDNS domain and token are both required. Exiting.${NC}"
+  exit 1
+fi
 
-echo -e "${CYAN}=== Updating system ===${NC}"
+echo -e "${GREEN}Using DuckDNS domain: ${DUCKDNS_DOMAIN}.duckdns.org${NC}"
+echo ""
+
+# ---------- Step 1: Update Ubuntu ----------
+echo -e "${YELLOW}[1/6] Updating Ubuntu packages...${NC}"
 export DEBIAN_FRONTEND=noninteractive
-retry 5 5 apt-get update -y
-apt-get upgrade -y -o Dpkg::Options::="--force-confold"
-apt-get install -y curl wget jq openssl certbot ufw
+apt update -y
+apt upgrade -y -o Dpkg::Options::="--force-confold"
+apt install -y curl wget unzip jq > /dev/null 2>&1
+echo -e "${GREEN}System updated.${NC}"
+echo ""
 
-echo -e "${CYAN}=== Enabling BBR ===${NC}"
-cat >> /etc/sysctl.conf <<EOF
-net.core.default_qdisc=fq
-net.ipv4.tcp_congestion_control=bbr
-EOF
-sysctl -p >/dev/null 2>&1 || true
+# ---------- Enable BBR congestion control ----------
+echo -e "${YELLOW}Enabling BBR congestion control...${NC}"
+if ! grep -q "net.core.default_qdisc=fq" /etc/sysctl.conf 2>/dev/null; then
+  echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf
+fi
+if ! grep -q "net.ipv4.tcp_congestion_control=bbr" /etc/sysctl.conf 2>/dev/null; then
+  echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.conf
+fi
+sysctl -p > /dev/null 2>&1
 
-echo -e "${CYAN}=== Installing Xray-core ===${NC}"
-retry 5 5 bash -c "bash <(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)"
+CURRENT_CC=$(sysctl -n net.ipv4.tcp_congestion_control)
+if [ "$CURRENT_CC" = "bbr" ]; then
+  echo -e "${GREEN}BBR is active.${NC}"
+else
+  echo -e "${YELLOW}BBR did not activate (current: $CURRENT_CC). This won't stop the install, but throughput may be lower than optimal.${NC}"
+fi
+echo ""
 
-mkdir -p /etc/systemd/system/xray.service.d
-cat > /etc/systemd/system/xray.service.d/restart-on-failure.conf <<EOF
-[Service]
-Restart=on-failure
-RestartSec=5s
-EOF
-systemctl daemon-reload
-
-wait_for_xray() {
-    local i=0
-    while [ $i -lt 15 ]; do
-        if systemctl is-active --quiet xray; then
-            return 0
-        fi
-        sleep 1
-        i=$((i + 1))
-    done
-    return 1
-}
-
-#######################################
-# [1/4] VLESS + REALITY (TCP, port 443)
-#######################################
-echo -e "${CYAN}=== [1/4] Installing VLESS + Reality (TCP) ===${NC}"
-
+# ---------- Step 2: Fixed port and masking site (no prompts) ----------
 PORT=443
 DEST="www.apple.com:443"
-SNI="www.apple.com"
+SNI=$(echo "$DEST" | cut -d: -f1)
+echo -e "${GREEN}Using port: $PORT${NC}"
+echo -e "${GREEN}Using masking site: $DEST (SNI: $SNI)${NC}"
+echo ""
 
+# ---------- Step 4: Install Xray-core ----------
+echo -e "${YELLOW}[2/6] Installing Xray-core...${NC}"
+bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
+echo -e "${GREEN}Xray installed.${NC}"
+echo ""
+
+# ---------- Step 5: Generate UUID, keys, short ID ----------
+echo -e "${YELLOW}[3/6] Generating UUID, key pair, and short ID...${NC}"
 UUID=$(xray uuid)
 KEY_OUTPUT=$(xray x25519)
 PRIVATE_KEY=$(echo "$KEY_OUTPUT" | grep -i "Private" | awk '{print $NF}')
@@ -90,22 +88,36 @@ PUBLIC_KEY=$(echo "$KEY_OUTPUT" | grep -i "Public" | awk '{print $NF}')
 SHORT_ID=$(openssl rand -hex 8)
 
 if [ -z "$PRIVATE_KEY" ] || [ -z "$PUBLIC_KEY" ]; then
-    echo -e "${RED}Failed to generate Reality keys. Aborting.${NC}"
-    exit 1
+  echo -e "${RED}Failed to generate keys. 'xray x25519' output format may have changed.${NC}"
+  echo -e "${RED}Raw output was:${NC}"
+  echo "$KEY_OUTPUT"
+  exit 1
 fi
 
+echo -e "${GREEN}UUID, keys, and short ID generated.${NC}"
+echo ""
+
+# ---------- Step 6: Write Xray config ----------
+echo -e "${YELLOW}[4/6] Writing Xray configuration...${NC}"
 mkdir -p /usr/local/etc/xray
+
 cat > "$XRAY_CONFIG" <<EOF
 {
-  "log": { "loglevel": "warning" },
+  "log": {
+    "loglevel": "warning"
+  },
   "inbounds": [
     {
-      "tag": "vless-reality-in",
       "listen": "0.0.0.0",
       "port": $PORT,
       "protocol": "vless",
       "settings": {
-        "clients": [ { "id": "$UUID", "flow": "xtls-rprx-vision" } ],
+        "clients": [
+          {
+            "id": "$UUID",
+            "flow": "xtls-rprx-vision"
+          }
+        ],
         "decryption": "none"
       },
       "streamSettings": {
@@ -115,344 +127,111 @@ cat > "$XRAY_CONFIG" <<EOF
           "show": false,
           "dest": "$DEST",
           "xver": 0,
-          "serverNames": [ "$SNI" ],
+          "serverNames": [
+            "$SNI"
+          ],
           "privateKey": "$PRIVATE_KEY",
-          "shortIds": [ "$SHORT_ID" ]
+          "shortIds": [
+            "$SHORT_ID"
+          ]
         }
       }
     }
   ],
   "outbounds": [
-    { "protocol": "freedom", "tag": "direct" }
+    {
+      "protocol": "freedom",
+      "tag": "direct"
+    }
   ]
 }
 EOF
 
-ufw allow "$PORT"/tcp >/dev/null 2>&1 || true
-ufw allow 80/tcp >/dev/null 2>&1 || true
-ufw --force enable >/dev/null 2>&1 || true
-
-systemctl enable xray >/dev/null 2>&1
-systemctl restart xray
-if ! wait_for_xray; then
-    echo -e "${RED}Xray failed to start. Check: journalctl -u xray -e${NC}"
-    exit 1
-fi
-
-PUBLIC_IP=$(curl -s -4 https://api.ipify.org || curl -s -4 https://ifconfig.me)
-
-VLESS_LINK="vless://${UUID}@${SERVER_ADDRESS}:${PORT}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${SNI}&fp=chrome&pbk=${PUBLIC_KEY}&sid=${SHORT_ID}&type=tcp&headerType=none#VLESS-Reality-${SERVER_ADDRESS}"
-
-cat > /root/vless-client-info.txt <<EOF
-=== VLESS + Reality (TCP, port $PORT) ===
-$VLESS_LINK
-EOF
-
-#################################################
-# [2/4] VLESS + REALITY + XHTTP (port 8443)
-#################################################
-echo -e "${CYAN}=== [2/4] Installing VLESS + Reality + XHTTP ===${NC}"
-
-XHTTP_PORT=8443
-XHTTP_UUID=$(xray uuid)
-XHTTP_PATH="/xhttp-api"
-
-cp "$XRAY_CONFIG" "${XRAY_CONFIG}.before-xhttp"
-
-jq --arg uuid "$XHTTP_UUID" \
-   --arg dest "$DEST" \
-   --arg sni "$SNI" \
-   --arg pk "$PRIVATE_KEY" \
-   --arg sid "$SHORT_ID" \
-   --arg path "$XHTTP_PATH" \
-   --argjson port "$XHTTP_PORT" \
-   '.inbounds += [{
-      "tag": "vless-xhttp-in",
-      "listen": "0.0.0.0",
-      "port": $port,
-      "protocol": "vless",
-      "settings": {
-        "clients": [ { "id": $uuid } ],
-        "decryption": "none"
-      },
-      "streamSettings": {
-        "network": "xhttp",
-        "security": "reality",
-        "xhttpSettings": { "path": $path, "mode": "auto" },
-        "realitySettings": {
-          "show": false,
-          "dest": $dest,
-          "xver": 0,
-          "serverNames": [ $sni ],
-          "privateKey": $pk,
-          "shortIds": [ $sid ]
-        }
-      }
-    }]' "$XRAY_CONFIG" > /tmp/xray-config-xhttp.json && mv /tmp/xray-config-xhttp.json "$XRAY_CONFIG"
-
-ufw allow "$XHTTP_PORT"/tcp >/dev/null 2>&1 || true
-
-if xray run -test -config "$XRAY_CONFIG" >/dev/null 2>&1; then
-    systemctl restart xray
-    if ! wait_for_xray; then
-        echo -e "${RED}Xray failed to start after XHTTP install. Rolling back.${NC}"
-        cp "${XRAY_CONFIG}.before-xhttp" "$XRAY_CONFIG"
-        systemctl restart xray
-        wait_for_xray || true
-    else
-        XHTTP_LINK="vless://${XHTTP_UUID}@${SERVER_ADDRESS}:${XHTTP_PORT}?encryption=none&security=reality&sni=${SNI}&fp=chrome&pbk=${PUBLIC_KEY}&sid=${SHORT_ID}&type=xhttp&path=${XHTTP_PATH}&mode=auto#VLESS-XHTTP-${SERVER_ADDRESS}"
-        cat >> /root/vless-client-info.txt <<EOF
-
-=== VLESS + Reality + XHTTP (port $XHTTP_PORT) ===
-$XHTTP_LINK
-EOF
-    fi
-else
-    echo -e "${RED}XHTTP config validation failed. Skipping XHTTP install.${NC}"
-    cp "${XRAY_CONFIG}.before-xhttp" "$XRAY_CONFIG"
-fi
-
-#######################################################
-# Shared Let's Encrypt certificate (for Trojan + Hysteria2)
-#######################################################
-echo -e "${CYAN}=== Obtaining TLS certificate for Trojan / Hysteria2 ===${NC}"
-
-ufw allow 80/tcp >/dev/null 2>&1 || true
-
-if [ ! -d "/etc/letsencrypt/live/${SERVER_ADDRESS}" ]; then
-    retry 3 10 certbot certonly --standalone --non-interactive --agree-tos \
-        --register-unsafely-without-email -d "$SERVER_ADDRESS" || true
-fi
-
-CERT_OK=0
-if [ -f "/etc/letsencrypt/live/${SERVER_ADDRESS}/fullchain.pem" ] && \
-   [ -f "/etc/letsencrypt/live/${SERVER_ADDRESS}/privkey.pem" ]; then
-    CERT_OK=1
-fi
-
-#######################################
-# [3/4] TROJAN (TLS, port 2096)
-#######################################
-if [ "$CERT_OK" -eq 1 ]; then
-    echo -e "${CYAN}=== [3/4] Installing Trojan (TLS) ===${NC}"
-
-    TROJAN_PORT=2096
-    TROJAN_PASSWORD=$(openssl rand -hex 16)
-    CERT_FILE="/etc/letsencrypt/live/${SERVER_ADDRESS}/fullchain.pem"
-    KEY_FILE="/etc/letsencrypt/live/${SERVER_ADDRESS}/privkey.pem"
-
-    cp "$XRAY_CONFIG" "${XRAY_CONFIG}.before-trojan"
-
-    jq --arg password "$TROJAN_PASSWORD" \
-       --arg cert "$CERT_FILE" \
-       --arg key "$KEY_FILE" \
-       --argjson port "$TROJAN_PORT" \
-       '.inbounds += [{
-          "tag": "trojan-in",
-          "listen": "0.0.0.0",
-          "port": $port,
-          "protocol": "trojan",
-          "settings": {
-            "clients": [ { "password": $password } ]
-          },
-          "streamSettings": {
-            "network": "tcp",
-            "security": "tls",
-            "tlsSettings": {
-              "certificates": [ { "certificateFile": $cert, "keyFile": $key } ]
-            }
-          }
-        }]' "$XRAY_CONFIG" > /tmp/xray-config-trojan.json && mv /tmp/xray-config-trojan.json "$XRAY_CONFIG"
-
-    ufw allow "$TROJAN_PORT"/tcp >/dev/null 2>&1 || true
-
-    if xray run -test -config "$XRAY_CONFIG" >/dev/null 2>&1; then
-        systemctl restart xray
-        if ! wait_for_xray; then
-            echo -e "${RED}Xray failed to start after Trojan install. Rolling back.${NC}"
-            cp "${XRAY_CONFIG}.before-trojan" "$XRAY_CONFIG"
-            systemctl restart xray
-            wait_for_xray || true
-        else
-            TROJAN_LINK="trojan://${TROJAN_PASSWORD}@${SERVER_ADDRESS}:${TROJAN_PORT}?security=tls&sni=${SERVER_ADDRESS}&type=tcp#Trojan-${SERVER_ADDRESS}"
-            cat >> /root/vless-client-info.txt <<EOF
-
-=== Trojan (TLS, port $TROJAN_PORT) ===
-$TROJAN_LINK
-EOF
-        fi
-    else
-        echo -e "${RED}Trojan config validation failed. Skipping Trojan install.${NC}"
-        cp "${XRAY_CONFIG}.before-trojan" "$XRAY_CONFIG"
-    fi
-else
-    echo -e "${YELLOW}Could not obtain TLS certificate. Skipping Trojan and Hysteria2.${NC}"
-fi
-
-#######################################
-# [4/4] HYSTERIA2 (UDP, port 8443)
-#######################################
-if [ "$CERT_OK" -eq 1 ]; then
-    echo -e "${CYAN}=== [4/4] Installing Hysteria2 ===${NC}"
-
-    retry 3 5 bash -c "bash <(curl -fsSL https://get.hy2.sh/)"
-
-    mkdir -p /etc/hysteria/tls
-    cp "/etc/letsencrypt/live/${SERVER_ADDRESS}/fullchain.pem" /etc/hysteria/tls/fullchain.pem
-    cp "/etc/letsencrypt/live/${SERVER_ADDRESS}/privkey.pem" /etc/hysteria/tls/privkey.pem
-    id -u hysteria >/dev/null 2>&1 && chown hysteria:hysteria /etc/hysteria/tls/*.pem || true
-    chmod 750 /etc/hysteria/tls
-    chmod 644 /etc/hysteria/tls/fullchain.pem
-    chmod 600 /etc/hysteria/tls/privkey.pem
-
-    HY2_PORT=8443
-    HY2_PASSWORD=$(openssl rand -hex 16)
-
-    cat > /etc/hysteria/config.yaml <<EOF
-listen: :${HY2_PORT}
-
-tls:
-  cert: /etc/hysteria/tls/fullchain.pem
-  key: /etc/hysteria/tls/privkey.pem
-
-auth:
-  type: password
-  password: ${HY2_PASSWORD}
-
-masquerade:
-  type: proxy
-  proxy:
-    url: https://news.ycombinator.com/
-    rewriteHost: true
-EOF
-
-    ufw allow 8443/udp >/dev/null 2>&1 || true
-
-    systemctl enable hysteria-server.service >/dev/null 2>&1 || true
-    systemctl restart hysteria-server.service
-
-    HY2_LINK="hysteria2://${HY2_PASSWORD}@${SERVER_ADDRESS}:${HY2_PORT}/?sni=${SERVER_ADDRESS}&insecure=0#Hysteria2-${SERVER_ADDRESS}"
-
-    cat > /root/hysteria2-client-info.txt <<EOF
-=== Hysteria2 (UDP, port $HY2_PORT) ===
-$HY2_LINK
-EOF
-fi
-
-#######################################
-# OPTIONAL: CLOUDFLARE WARP (Y/N)
-#######################################
+echo -e "${GREEN}Config written to $XRAY_CONFIG${NC}"
 echo ""
-read -r -p "Do you want to install Cloudflare WARP (route all Xray traffic through WARP)? [Y/N]: " INSTALL_WARP
-case "$INSTALL_WARP" in
-    [Yy]*)
-        echo -e "${CYAN}=== Installing Cloudflare WARP ===${NC}"
 
-        curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | gpg --yes --dearmor --output /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
-        echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ noble main" | tee /etc/apt/sources.list.d/cloudflare-client.list
-        retry 5 5 apt-get update -y
-        retry 5 5 apt-get install -y cloudflare-warp
+# ---------- Step 7: Firewall ----------
+echo -e "${YELLOW}[5/6] Opening port $PORT in firewall (if ufw is active)...${NC}"
+if command -v ufw > /dev/null 2>&1; then
+  ufw allow "$PORT"/tcp > /dev/null 2>&1 || true
+fi
+echo -e "${GREEN}Done. (Remember to also open port $PORT in your Lightsail networking tab!)${NC}"
+echo ""
 
-        systemctl enable warp-svc >/dev/null 2>&1
-        systemctl start warp-svc
+# ---------- Step 8: Start Xray ----------
+# ---------- Step 8: Start Xray ----------
+echo -e "${YELLOW}[6/6] Starting Xray service...${NC}"
 
-        wait_for_warp_daemon() {
-            local i=0
-            while [ $i -lt 20 ]; do
-                if warp-cli --accept-tos status >/dev/null 2>&1; then
-                    return 0
-                fi
-                sleep 1
-                i=$((i + 1))
-            done
-            return 1
-        }
-        wait_for_warp_daemon || echo -e "${YELLOW}WARP daemon slow to start, continuing anyway.${NC}"
+# Make Xray auto-restart if it ever crashes
+mkdir -p /etc/systemd/system/xray.service.d
+cat > /etc/systemd/system/xray.service.d/restart-on-failure.conf <<EOF
+[Service]
+Restart=on-failure
+RestartSec=5s
+EOF
+systemctl daemon-reload
 
-        if ! warp-cli --accept-tos registration show >/dev/null 2>&1; then
-            retry 5 5 warp-cli --accept-tos registration new
-        fi
+systemctl enable xray > /dev/null 2>&1
+systemctl restart xray
+sleep 2
 
-        warp-cli --accept-tos mode proxy >/dev/null 2>&1 || true
-        warp-cli --accept-tos tunnel protocol set MASQUE >/dev/null 2>&1 || true
-        warp-cli --accept-tos proxy port 40000 >/dev/null 2>&1 || true
-        warp-cli --accept-tos connect >/dev/null 2>&1 || true
+if systemctl is-active --quiet xray; then
+  echo -e "${GREEN}Xray is running (auto-restart enabled if it ever crashes).${NC}"
+else
+  echo -e "${RED}Xray failed to start. Check logs with: journalctl -u xray -e${NC}"
+  exit 1
+fi
+echo ""
 
-        WARP_OK=0
-        i=0
-        while [ $i -lt 60 ]; do
-            if curl -s --max-time 5 --proxy socks5h://127.0.0.1:40000 https://api.ipify.org >/dev/null 2>&1; then
-                WARP_OK=1
-                break
-            fi
-            if [ $i -eq 30 ]; then
-                warp-cli --accept-tos connect >/dev/null 2>&1 || true
-            fi
-            sleep 1
-            i=$((i + 1))
-        done
+# ---------- Step 9: Get server public IP ----------
+PUBLIC_IP=$(curl -s -4 https://api.ipify.org || curl -s -4 ifconfig.me)
+echo -e "${GREEN}Public IP: $PUBLIC_IP${NC}"
+echo ""
 
-        if [ "$WARP_OK" -eq 1 ]; then
-            cp "$XRAY_CONFIG" "${XRAY_CONFIG}.before-warp"
-            jq '.outbounds = [{
-                  "protocol": "socks",
-                  "tag": "warp",
-                  "settings": {
-                    "servers": [ { "address": "127.0.0.1", "port": 40000 } ]
-                  }
-                }]' "$XRAY_CONFIG" > /tmp/xray-config-warp.json && mv /tmp/xray-config-warp.json "$XRAY_CONFIG"
-
-            if xray run -test -config "$XRAY_CONFIG" >/dev/null 2>&1; then
-                systemctl restart xray
-                if ! wait_for_xray; then
-                    echo -e "${RED}Xray failed to start after WARP install. Rolling back.${NC}"
-                    cp "${XRAY_CONFIG}.before-warp" "$XRAY_CONFIG"
-                    systemctl restart xray
-                    wait_for_xray || true
-                else
-                    echo -e "${GREEN}WARP is active. All Xray traffic now routes through WARP.${NC}"
-                fi
-            else
-                echo -e "${RED}WARP outbound config validation failed. Rolling back.${NC}"
-                cp "${XRAY_CONFIG}.before-warp" "$XRAY_CONFIG"
-            fi
-        else
-            echo -e "${RED}WARP did not come online in time. Skipping WARP integration.${NC}"
-        fi
-        ;;
-    *)
-        echo -e "${YELLOW}Skipping WARP installation.${NC}"
-        ;;
-esac
-
-#######################################
-# DuckDNS setup
-#######################################
-echo -e "${CYAN}=== Configuring DuckDNS ===${NC}"
+# ---------- Step 10: Set up DuckDNS ----------
+echo -e "${YELLOW}Updating DuckDNS record...${NC}"
 mkdir -p /etc/duckdns
-
 cat > /etc/duckdns/duck.sh <<EOF
 #!/bin/bash
-curl -s "https://www.duckdns.org/update?domains=${DUCKDNS_DOMAIN}&token=${DUCKDNS_TOKEN}&ip=" -o /etc/duckdns/duck.log
+curl -s "https://www.duckdns.org/update?domains=${DUCKDNS_DOMAIN}&token=${DUCKDNS_TOKEN}&ip=" > /etc/duckdns/duck.log 2>&1
 EOF
-chmod 700 /etc/duckdns/duck.sh
+chmod +x /etc/duckdns/duck.sh
+/etc/duckdns/duck.sh
 
-cat > /etc/duckdns/duck-boot.sh <<EOF
+DUCKDNS_RESULT=$(cat /etc/duckdns/duck.log)
+if [ "$DUCKDNS_RESULT" != "OK" ]; then
+  echo -e "${RED}DuckDNS update failed. Response: $DUCKDNS_RESULT${NC}"
+  echo -e "${RED}Double check your domain and token are correct.${NC}"
+  exit 1
+fi
+
+# ---------- Step 11: Boot-time DuckDNS retry script ----------
+# On every boot: wait 20s for networking, then retry the update every 5s, up to 10 attempts.
+cat > /etc/duckdns/duck-boot.sh <<'EOF'
 #!/bin/bash
+LOGFILE="/etc/duckdns/duck-boot.log"
 sleep 20
-for i in \$(seq 1 10); do
-    /etc/duckdns/duck.sh
-    if grep -q "OK" /etc/duckdns/duck.log 2>/dev/null; then
-        exit 0
-    fi
-    sleep 5
-done
-EOF
-chmod 700 /etc/duckdns/duck-boot.sh
 
+for i in $(seq 1 10); do
+  /etc/duckdns/duck.sh
+  RESULT=$(cat /etc/duckdns/duck.log)
+  if [ "$RESULT" = "OK" ]; then
+    echo "$(date): DuckDNS updated successfully on attempt $i" >> "$LOGFILE"
+    exit 0
+  fi
+  echo "$(date): Attempt $i failed (response: $RESULT), retrying in 5s..." >> "$LOGFILE"
+  sleep 5
+done
+
+echo "$(date): DuckDNS update failed after 10 attempts" >> "$LOGFILE"
+exit 1
+EOF
+chmod +x /etc/duckdns/duck-boot.sh
+
+# systemd service to run the boot script once networking is up
 cat > /etc/systemd/system/duckdns-boot.service <<EOF
 [Unit]
-Description=DuckDNS boot update
+Description=DuckDNS IP update on boot
 After=network-online.target
 Wants=network-online.target
 
@@ -465,71 +244,1040 @@ WantedBy=multi-user.target
 EOF
 
 systemctl daemon-reload
-systemctl enable duckdns-boot.service >/dev/null 2>&1
-systemctl start duckdns-boot.service >/dev/null 2>&1 || true
+systemctl enable duckdns-boot.service > /dev/null 2>&1
 
-( crontab -l 2>/dev/null | grep -v duckdns ; echo "0 * * * * /etc/duckdns/duck.sh >/dev/null 2>&1" ) | crontab -
+# Ongoing check once the server has been up for a while: every 1 hour
+( crontab -l 2>/dev/null | grep -v duck.sh ; echo "0 * * * * /etc/duckdns/duck.sh >/dev/null 2>&1" ) | crontab -
 
-retry 3 5 /etc/duckdns/duck.sh
+SERVER_ADDRESS="${DUCKDNS_DOMAIN}.duckdns.org"
+echo -e "${GREEN}DuckDNS domain is live: $SERVER_ADDRESS${NC}"
+echo -e "${GREEN}On every reboot: waits 20s, then retries every 5s (up to 10 tries) until it updates.${NC}"
+echo -e "${GREEN}Ongoing check: every 1 hour.${NC}"
+echo ""
 
-#######################################
-# FINAL: ALL INSTALLED PROTOCOLS + CLIENT LINKS
-#######################################
+# ---------- Build client link ----------
+VLESS_LINK="vless://${UUID}@${SERVER_ADDRESS}:${PORT}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${SNI}&fp=chrome&pbk=${PUBLIC_KEY}&sid=${SHORT_ID}&type=tcp&headerType=none#VLESS-Reality-${SERVER_ADDRESS}"
+
+# ---------- Final summary ----------
+echo -e "${CYAN}=============================================${NC}"
+echo -e "${CYAN}          INSTALLATION COMPLETE!${NC}"
+echo -e "${CYAN}=============================================${NC}"
 echo ""
-echo -e "${GREEN}=================================================${NC}"
-echo -e "${GREEN}         VPN Setup Complete - Client Links       ${NC}"
-echo -e "${GREEN}=================================================${NC}"
+echo -e "${GREEN}Server IP     :${NC} $PUBLIC_IP"
+echo -e "${GREEN}DuckDNS       :${NC} $SERVER_ADDRESS"
+echo -e "${GREEN}Port          :${NC} $PORT"
+echo -e "${GREEN}UUID          :${NC} $UUID"
+echo -e "${GREEN}Public Key    :${NC} $PUBLIC_KEY"
+echo -e "${GREEN}Private Key   :${NC} $PRIVATE_KEY (keep this on server, don't share)"
+echo -e "${GREEN}Short ID      :${NC} $SHORT_ID"
+echo -e "${GREEN}SNI (masking) :${NC} $SNI"
+echo -e "${GREEN}Flow          :${NC} xtls-rprx-vision"
+echo -e "${GREEN}Network       :${NC} tcp"
 echo ""
-echo -e "${CYAN}Server address:${NC} $SERVER_ADDRESS"
-echo -e "${CYAN}Public IP:${NC} $PUBLIC_IP"
+echo -e "${YELLOW}Client Import Link (copy this into v2rayNG, NekoBox, Streisand, etc):${NC}"
 echo ""
-echo -e "${CYAN}1) VLESS + Reality (TCP, port $PORT):${NC}"
 echo "$VLESS_LINK"
 echo ""
-if [ -n "${XHTTP_LINK:-}" ]; then
-    echo -e "${CYAN}2) VLESS + Reality + XHTTP (port $XHTTP_PORT):${NC}"
-    echo "$XHTTP_LINK"
-    echo ""
-fi
-if [ -n "${TROJAN_LINK:-}" ]; then
-    echo -e "${CYAN}3) Trojan TLS (port $TROJAN_PORT):${NC}"
-    echo "$TROJAN_LINK"
-    echo ""
-fi
-if [ -n "${HY2_LINK:-}" ]; then
-    echo -e "${CYAN}4) Hysteria2 (UDP, port $HY2_PORT):${NC}"
-    echo "$HY2_LINK"
-    echo ""
-fi
 
-{
-    echo "=== VPN Client Links - $SERVER_ADDRESS ==="
-    echo ""
-    echo "1) VLESS + Reality (TCP, port $PORT):"
-    echo "$VLESS_LINK"
-    echo ""
-    if [ -n "${XHTTP_LINK:-}" ]; then
-        echo "2) VLESS + Reality + XHTTP (port $XHTTP_PORT):"
+# Save to file for later reference
+cat > /root/vless-client-info.txt <<EOF
+Server IP     : $PUBLIC_IP
+DuckDNS       : $SERVER_ADDRESS
+Port          : $PORT
+UUID          : $UUID
+Public Key    : $PUBLIC_KEY
+Private Key   : $PRIVATE_KEY
+Short ID      : $SHORT_ID
+SNI           : $SNI
+Flow          : xtls-rprx-vision
+Network       : tcp
+
+Client Link:
+$VLESS_LINK
+EOF
+
+echo -e "${CYAN}This info was also saved to /root/vless-client-info.txt${NC}"
+echo ""
+
+cat /root/vless-client-info.txt
+echo ""
+echo -e "${GREEN}All done. Enjoy!${NC}"
+echo ""
+echo -e "${YELLOW}Please Reboot The server to make sure all system and kernel updates take effect.${NC}"
+echo -e "${YELLOW}Your client info above is also saved in /root/vless-client-info.txt, so you can check it again after reboot.${NC}"
+
+# ============================================================
+# OPTIONAL: VLESS + REALITY + XHTTP
+# ============================================================
+
+echo ""
+echo -e "${CYAN}=============================================${NC}"
+echo -e "${CYAN}   OPTIONAL: VLESS + REALITY + XHTTP${NC}"
+echo -e "${CYAN}=============================================${NC}"
+echo ""
+
+read -r -p "Do you want to install VLESS + Reality + XHTTP on port 8443? [Y/N]: " INSTALL_XHTTP
+
+case "$INSTALL_XHTTP" in
+
+    Y|y)
+
+        echo ""
+        echo -e "${YELLOW}Installing VLESS + Reality + XHTTP...${NC}"
+        echo ""
+
+        XHTTP_PORT=8443
+        XHTTP_UUID=$(xray uuid)
+        XHTTP_PATH="/xhttp-api"
+
+        cp "$XRAY_CONFIG" "${XRAY_CONFIG}.before-xhttp"
+
+        jq \
+          --arg uuid "$XHTTP_UUID" \
+          --argjson port "$XHTTP_PORT" \
+          --arg path "$XHTTP_PATH" \
+          '
+          .inbounds += [
+            {
+              "listen": "0.0.0.0",
+              "port": $port,
+              "protocol": "vless",
+              "settings": {
+                "clients": [
+                  {
+                    "id": $uuid
+                  }
+                ],
+                "decryption": "none"
+              },
+              "streamSettings": {
+                "network": "xhttp",
+                "security": "reality",
+                "realitySettings": {
+                  "show": false,
+                  "dest": "www.apple.com:443",
+                  "xver": 0,
+                  "serverNames": [
+                    "www.apple.com"
+                  ],
+                  "privateKey": "'"$PRIVATE_KEY"'",
+                  "shortIds": [
+                    "'"$SHORT_ID"'"
+                  ]
+                },
+                "xhttpSettings": {
+                  "path": $path,
+                  "mode": "auto"
+                }
+              }
+            }
+          ]
+          ' "$XRAY_CONFIG" > "${XRAY_CONFIG}.tmp"
+
+        mv "${XRAY_CONFIG}.tmp" "$XRAY_CONFIG"
+
+        if command -v ufw > /dev/null 2>&1; then
+            ufw allow "$XHTTP_PORT"/tcp > /dev/null 2>&1 || true
+        fi
+
+        echo -e "${YELLOW}Validating Xray configuration...${NC}"
+
+        if ! xray run -test -config "$XRAY_CONFIG" >/tmp/xray-xhttp-test.log 2>&1; then
+            echo -e "${RED}XHTTP configuration validation failed.${NC}"
+            echo ""
+            cat /tmp/xray-xhttp-test.log
+            echo ""
+            echo -e "${YELLOW}Restoring previous Xray configuration...${NC}"
+            cp "${XRAY_CONFIG}.before-xhttp" "$XRAY_CONFIG"
+            systemctl restart xray
+            exit 1
+        fi
+
+        systemctl restart xray
+        sleep 2
+
+        if ! systemctl is-active --quiet xray; then
+            echo -e "${RED}Xray failed after XHTTP installation.${NC}"
+            echo -e "${YELLOW}Restoring previous Xray configuration...${NC}"
+            cp "${XRAY_CONFIG}.before-xhttp" "$XRAY_CONFIG"
+            systemctl restart xray
+            exit 1
+        fi
+
+        XHTTP_LINK="vless://${XHTTP_UUID}@${SERVER_ADDRESS}:${XHTTP_PORT}?encryption=none&type=xhttp&path=%2Fxhttp-api&mode=auto&security=reality&sni=${SNI}&fp=chrome&pbk=${PUBLIC_KEY}&sid=${SHORT_ID}#VLESS-Reality-XHTTP-${SERVER_ADDRESS}"
+
+        echo ""
+        echo -e "${GREEN}VLESS + Reality + XHTTP installed successfully.${NC}"
+        echo -e "${GREEN}Port          :${NC} $XHTTP_PORT"
+        echo -e "${GREEN}UUID          :${NC} $XHTTP_UUID"
+        echo -e "${GREEN}Path          :${NC} $XHTTP_PATH"
+        echo ""
+        echo -e "${YELLOW}XHTTP Client Import Link (copy/paste this into your client):${NC}"
+        echo ""
         echo "$XHTTP_LINK"
         echo ""
-    fi
-    if [ -n "${TROJAN_LINK:-}" ]; then
-        echo "3) Trojan TLS (port $TROJAN_PORT):"
-        echo "$TROJAN_LINK"
+
+        cat >> /root/vless-client-info.txt <<EOF
+
+VLESS + Reality + XHTTP:
+Port          : $XHTTP_PORT
+UUID          : $XHTTP_UUID
+Path          : $XHTTP_PATH
+Client Link:
+$XHTTP_LINK
+EOF
+
+        echo -e "${GREEN}XHTTP client info also saved to /root/vless-client-info.txt${NC}"
         echo ""
-    fi
-    if [ -n "${HY2_LINK:-}" ]; then
-        echo "4) Hysteria2 (UDP, port $HY2_PORT):"
+
+        ;;
+
+    N|n)
+
+        echo ""
+        echo -e "${GREEN}VLESS + Reality + XHTTP installation skipped.${NC}"
+        echo ""
+
+        ;;
+
+    *)
+
+        echo ""
+        echo -e "${RED}Invalid choice. Please enter Y or N.${NC}"
+        echo ""
+        exit 1
+        ;;
+
+esac
+
+# ============================================================
+# OPTIONAL: HYSTERIA 2
+# ============================================================
+
+echo ""
+echo -e "${CYAN}=============================================${NC}"
+echo -e "${CYAN}          OPTIONAL: HYSTERIA 2${NC}"
+echo -e "${CYAN}=============================================${NC}"
+echo ""
+
+read -r -p "Do you want to install Hysteria 2 on UDP port 8443? [Y/N]: " INSTALL_HYSTERIA
+
+case "$INSTALL_HYSTERIA" in
+
+    Y|y)
+
+        echo ""
+        echo -e "${YELLOW}Installing Hysteria 2...${NC}"
+        echo ""
+
+        HY2_PORT=8443
+        HY2_CONFIG="/etc/hysteria/config.yaml"
+        HY2_TLS_DIR="/etc/hysteria/tls"
+
+        # ----------------------------------------------------
+        # Install Hysteria 2
+        # ----------------------------------------------------
+
+        if ! command -v hysteria >/dev/null 2>&1; then
+            bash <(curl -fsSL https://get.hy2.sh/)
+        fi
+
+        echo -e "${GREEN}Hysteria 2 installed.${NC}"
+        hysteria version | head -n 8
+        echo ""
+
+        # ----------------------------------------------------
+        # Install Certbot for Let's Encrypt
+        # ----------------------------------------------------
+
+        echo -e "${YELLOW}Installing Certbot...${NC}"
+        apt-get update -y
+        apt-get install -y certbot openssl curl
+
+        # HTTP-01 certificate validation requires TCP 80.
+        if command -v ufw > /dev/null 2>&1; then
+            ufw allow 80/tcp > /dev/null 2>&1 || true
+            ufw allow "$HY2_PORT"/udp > /dev/null 2>&1 || true
+        fi
+
+        echo ""
+        echo -e "${YELLOW}Obtaining Let's Encrypt certificate for ${SERVER_ADDRESS}...${NC}"
+        echo -e "${YELLOW}TCP port 80 must be open in your VPS/Lightsail firewall.${NC}"
+        echo ""
+
+           certbot certonly \
+          --standalone \
+          --non-interactive \
+          --agree-tos \
+          --register-unsafely-without-email \
+          -d "$SERVER_ADDRESS"
+
+            
+        echo -e "${GREEN}TLS certificate obtained successfully.${NC}"
+        echo ""
+
+        # ----------------------------------------------------
+        # Create dedicated TLS copies readable by Hysteria
+        # ----------------------------------------------------
+
+        mkdir -p "$HY2_TLS_DIR"
+
+        cp "/etc/letsencrypt/live/${SERVER_ADDRESS}/fullchain.pem"            "${HY2_TLS_DIR}/fullchain.pem"
+
+        cp "/etc/letsencrypt/live/${SERVER_ADDRESS}/privkey.pem"            "${HY2_TLS_DIR}/privkey.pem"
+
+        chown -R hysteria:hysteria "$HY2_TLS_DIR"
+        chmod 750 "$HY2_TLS_DIR"
+        chmod 644 "${HY2_TLS_DIR}/fullchain.pem"
+        chmod 600 "${HY2_TLS_DIR}/privkey.pem"
+
+        # ----------------------------------------------------
+        # Generate Hysteria 2 password
+        # ----------------------------------------------------
+
+        HY2_PASSWORD=$(openssl rand -hex 32)
+
+        # ----------------------------------------------------
+        # Write Hysteria 2 server configuration
+        # ----------------------------------------------------
+
+        cat > "$HY2_CONFIG" <<EOF
+listen: 0.0.0.0:${HY2_PORT}
+
+tls:
+  cert: ${HY2_TLS_DIR}/fullchain.pem
+  key: ${HY2_TLS_DIR}/privkey.pem
+
+auth:
+  type: password
+  password: ${HY2_PASSWORD}
+
+masquerade:
+  type: proxy
+  proxy:
+    url: https://news.ycombinator.com/
+    rewriteHost: true
+EOF
+
+        chown root:hysteria "$HY2_CONFIG"
+        chmod 640 "$HY2_CONFIG"
+
+        # ----------------------------------------------------
+        # Enable and start Hysteria 2
+        # ----------------------------------------------------
+
+        systemctl enable hysteria-server.service > /dev/null 2>&1
+        systemctl restart hysteria-server.service
+        sleep 2
+
+        if ! systemctl is-active --quiet hysteria-server.service; then
+            echo -e "${RED}Hysteria 2 failed to start.${NC}"
+            echo ""
+            journalctl -u hysteria-server.service -n 30 --no-pager || true
+            exit 1
+        fi
+
+        echo -e "${GREEN}Hysteria 2 is running.${NC}"
+        echo ""
+
+        # ----------------------------------------------------
+        # Build client link
+        # ----------------------------------------------------
+
+        HY2_LINK="hysteria2://${HY2_PASSWORD}@${SERVER_ADDRESS}:${HY2_PORT}/?sni=${SERVER_ADDRESS}#Hysteria2-${SERVER_ADDRESS}"
+
+        # ----------------------------------------------------
+        # Save Hysteria 2 client information
+        # ----------------------------------------------------
+
+        cat > /root/hysteria2-client-info.txt <<EOF
+Hysteria 2 Client Information
+
+Server        : ${SERVER_ADDRESS}
+Port          : ${HY2_PORT}/udp
+Password      : ${HY2_PASSWORD}
+SNI           : ${SERVER_ADDRESS}
+TLS           : Let's Encrypt
+Masquerade    : https://news.ycombinator.com/
+
+Client Link:
+${HY2_LINK}
+EOF
+
+        echo ""
+        echo -e "${CYAN}=============================================${NC}"
+        echo -e "${CYAN}       HYSTERIA 2 CONFIGURATION COMPLETE${NC}"
+        echo -e "${CYAN}=============================================${NC}"
+        echo ""
+        echo -e "${GREEN}Server        :${NC} ${SERVER_ADDRESS}"
+        echo -e "${GREEN}Port          :${NC} ${HY2_PORT}/udp"
+        echo -e "${GREEN}TLS           :${NC} Let's Encrypt"
+        echo -e "${GREEN}Masquerade    :${NC} https://news.ycombinator.com/"
+        echo ""
+        echo -e "${YELLOW}Hysteria 2 Client Import Link (copy/paste this into your client):${NC}"
+        echo ""
         echo "$HY2_LINK"
         echo ""
-    fi
-} > /root/all-client-links.txt
+        echo -e "${GREEN}Hysteria 2 client info saved to /root/hysteria2-client-info.txt${NC}"
+        echo ""
 
-chmod 600 /root/all-client-links.txt
-chmod 600 /root/vless-client-info.txt 2>/dev/null || true
-chmod 600 /root/hysteria2-client-info.txt 2>/dev/null || true
+        ;;
 
-echo -e "${YELLOW}Keep the links above private. Do not share them.${NC}"
-echo -e "${YELLOW}Saved to /root/all-client-links.txt (root-only readable).${NC}"
+    N|n)
+
+        echo ""
+        echo -e "${GREEN}Hysteria 2 installation skipped.${NC}"
+        echo ""
+
+        ;;
+
+    *)
+
+        echo ""
+        echo -e "${RED}Invalid choice. Please enter Y or N.${NC}"
+        echo ""
+        exit 1
+        ;;
+
+esac
+
+
+# ============================================================
+# OPTIONAL: TROJAN + TLS (Xray)
+# ============================================================
+
+echo ""
+echo -e "${CYAN}=============================================${NC}"
+echo -e "${CYAN}          OPTIONAL: TROJAN + TLS${NC}"
+echo -e "${CYAN}=============================================${NC}"
+echo ""
+
+read -r -p "Do you want to install Trojan + TLS on TCP port 2053? [Y/N]: " INSTALL_TROJAN
+
+case "$INSTALL_TROJAN" in
+
+    Y|y)
+
+        echo ""
+        echo -e "${YELLOW}Installing Trojan + TLS...${NC}"
+        echo ""
+
+        TROJAN_PORT=2053
+        TROJAN_TLS_DIR="/usr/local/etc/xray/tls"
+        TROJAN_PASSWORD=$(openssl rand -hex 16)
+
+        # ----------------------------------------------------
+        # Get a Let's Encrypt certificate (reuse if Hysteria 2
+        # already obtained one for this domain)
+        # ----------------------------------------------------
+
+        if [ -f "/etc/letsencrypt/live/${SERVER_ADDRESS}/fullchain.pem" ]; then
+            echo -e "${GREEN}Existing Let's Encrypt certificate found for ${SERVER_ADDRESS}. Reusing it.${NC}"
+        else
+            echo -e "${YELLOW}Installing Certbot...${NC}"
+            apt-get update -y
+            apt-get install -y certbot openssl curl
+
+            if command -v ufw > /dev/null 2>&1; then
+                ufw allow 80/tcp > /dev/null 2>&1 || true
+            fi
+
+            echo -e "${YELLOW}Obtaining Let's Encrypt certificate for ${SERVER_ADDRESS}...${NC}"
+            echo -e "${YELLOW}TCP port 80 must be open in your VPS/Lightsail firewall.${NC}"
+            echo ""
+
+            certbot certonly \
+              --standalone \
+              --non-interactive \
+              --agree-tos \
+              --register-unsafely-without-email \
+              -d "$SERVER_ADDRESS"
+
+            echo -e "${GREEN}TLS certificate obtained successfully.${NC}"
+        fi
+        echo ""
+
+        # ----------------------------------------------------
+        # Copy certs to a directory readable by the Xray user
+        # ----------------------------------------------------
+
+        XRAY_USER=$(systemctl show -p User --value xray 2>/dev/null)
+        [ -z "$XRAY_USER" ] && XRAY_USER="root"
+        XRAY_GROUP=$(id -gn "$XRAY_USER" 2>/dev/null || echo "root")
+
+        mkdir -p "$TROJAN_TLS_DIR"
+        cp "/etc/letsencrypt/live/${SERVER_ADDRESS}/fullchain.pem" "${TROJAN_TLS_DIR}/fullchain.pem"
+        cp "/etc/letsencrypt/live/${SERVER_ADDRESS}/privkey.pem"   "${TROJAN_TLS_DIR}/privkey.pem"
+
+        chown -R "${XRAY_USER}:${XRAY_GROUP}" "$TROJAN_TLS_DIR"
+        chmod 750 "$TROJAN_TLS_DIR"
+        chmod 644 "${TROJAN_TLS_DIR}/fullchain.pem"
+        chmod 600 "${TROJAN_TLS_DIR}/privkey.pem"
+
+        # Auto-copy renewed certs and restart Xray after each renewal
+        mkdir -p /etc/letsencrypt/renewal-hooks/deploy
+        cat > /etc/letsencrypt/renewal-hooks/deploy/xray-trojan.sh <<'EOF'
+#!/bin/bash
+TLS_DIR="/usr/local/etc/xray/tls"
+XRAY_USER=$(systemctl show -p User --value xray 2>/dev/null)
+[ -z "$XRAY_USER" ] && XRAY_USER="root"
+XRAY_GROUP=$(id -gn "$XRAY_USER" 2>/dev/null || echo "root")
+if [ -n "$RENEWED_LINEAGE" ] && [ -d "$TLS_DIR" ]; then
+  cp "$RENEWED_LINEAGE/fullchain.pem" "$TLS_DIR/fullchain.pem"
+  cp "$RENEWED_LINEAGE/privkey.pem"   "$TLS_DIR/privkey.pem"
+  chown -R "$XRAY_USER:$XRAY_GROUP" "$TLS_DIR"
+  chmod 644 "$TLS_DIR/fullchain.pem"
+  chmod 600 "$TLS_DIR/privkey.pem"
+  systemctl restart xray
+fi
+EOF
+        chmod +x /etc/letsencrypt/renewal-hooks/deploy/xray-trojan.sh
+
+        # ----------------------------------------------------
+        # Add Trojan inbound to Xray config
+        # ----------------------------------------------------
+
+        cp "$XRAY_CONFIG" "${XRAY_CONFIG}.before-trojan"
+
+        jq \
+          --arg password "$TROJAN_PASSWORD" \
+          --argjson port "$TROJAN_PORT" \
+          --arg cert "${TROJAN_TLS_DIR}/fullchain.pem" \
+          --arg key "${TROJAN_TLS_DIR}/privkey.pem" \
+          '
+          .inbounds += [
+            {
+              "listen": "0.0.0.0",
+              "port": $port,
+              "protocol": "trojan",
+              "settings": {
+                "clients": [
+                  {
+                    "password": $password
+                  }
+                ]
+              },
+              "streamSettings": {
+                "network": "tcp",
+                "security": "tls",
+                "tlsSettings": {
+                  "alpn": ["http/1.1"],
+                  "certificates": [
+                    {
+                      "certificateFile": $cert,
+                      "keyFile": $key
+                    }
+                  ]
+                }
+              }
+            }
+          ]
+          ' "$XRAY_CONFIG" > "${XRAY_CONFIG}.tmp"
+
+        mv "${XRAY_CONFIG}.tmp" "$XRAY_CONFIG"
+
+        if command -v ufw > /dev/null 2>&1; then
+            ufw allow "$TROJAN_PORT"/tcp > /dev/null 2>&1 || true
+        fi
+
+        # ----------------------------------------------------
+        # Validate, restart, roll back on failure
+        # ----------------------------------------------------
+
+        echo -e "${YELLOW}Validating Xray configuration...${NC}"
+
+        if ! xray run -test -config "$XRAY_CONFIG" >/tmp/xray-trojan-test.log 2>&1; then
+            echo -e "${RED}Trojan configuration validation failed.${NC}"
+            echo ""
+            cat /tmp/xray-trojan-test.log
+            echo ""
+            echo -e "${YELLOW}Restoring previous Xray configuration...${NC}"
+            cp "${XRAY_CONFIG}.before-trojan" "$XRAY_CONFIG"
+            systemctl restart xray
+            exit 1
+        fi
+
+        systemctl restart xray
+        sleep 2
+
+        if ! systemctl is-active --quiet xray; then
+            echo -e "${RED}Xray failed after Trojan installation.${NC}"
+            echo -e "${YELLOW}Restoring previous Xray configuration...${NC}"
+            cp "${XRAY_CONFIG}.before-trojan" "$XRAY_CONFIG"
+            systemctl restart xray
+            exit 1
+        fi
+
+        # ----------------------------------------------------
+        # Client link + save info
+        # ----------------------------------------------------
+
+        TROJAN_LINK="trojan://${TROJAN_PASSWORD}@${SERVER_ADDRESS}:${TROJAN_PORT}?security=tls&sni=${SERVER_ADDRESS}&type=tcp&fp=chrome&alpn=http%2F1.1#Trojan-TLS-${SERVER_ADDRESS}"
+
+        cat > /root/trojan-client-info.txt <<EOF
+Trojan + TLS Client Information
+
+Server        : ${SERVER_ADDRESS}
+Port          : ${TROJAN_PORT}/tcp
+Password      : ${TROJAN_PASSWORD}
+SNI           : ${SERVER_ADDRESS}
+TLS           : Let's Encrypt
+
+Client Link:
+${TROJAN_LINK}
+EOF
+        chmod 600 /root/trojan-client-info.txt
+
+        echo ""
+        echo -e "${CYAN}=============================================${NC}"
+        echo -e "${CYAN}        TROJAN + TLS CONFIGURATION COMPLETE${NC}"
+        echo -e "${CYAN}=============================================${NC}"
+        echo ""
+        echo -e "${GREEN}Server        :${NC} ${SERVER_ADDRESS}"
+        echo -e "${GREEN}Port          :${NC} ${TROJAN_PORT}/tcp"
+        echo -e "${GREEN}Password      :${NC} ${TROJAN_PASSWORD}"
+        echo ""
+        echo -e "${YELLOW}Trojan Client Import Link (copy/paste this into your client):${NC}"
+        echo ""
+        echo "$TROJAN_LINK"
+        echo ""
+        echo -e "${YELLOW}Remember to open TCP port ${TROJAN_PORT} (and TCP 80 if a new cert was requested) in your Lightsail networking tab!${NC}"
+        echo -e "${GREEN}Trojan client info saved to /root/trojan-client-info.txt${NC}"
+        echo ""
+
+        ;;
+
+    N|n)
+
+        echo ""
+        echo -e "${GREEN}Trojan + TLS installation skipped.${NC}"
+        echo ""
+
+        ;;
+
+    *)
+
+        echo ""
+        echo -e "${RED}Invalid choice. Please enter Y or N.${NC}"
+        echo ""
+        exit 1
+        ;;
+
+esac
+
+# ============================================================
+# OPTIONAL: CLOUDFLARE WARP FOR XRAY OUTBOUND ONLY
+#
+# VLESS -> Xray -> WARP SOCKS5 -> Internet
+#
+# VPS SSH / DuckDNS / system traffic remain on normal route.
+# ============================================================
+
+echo ""
+echo -e "${CYAN}=============================================${NC}"
+echo -e "${CYAN}     OPTIONAL: CLOUDFLARE WARP OUTBOUND${NC}"
+echo -e "${CYAN}=============================================${NC}"
+echo ""
+
+read -r -p "Do you want to install WARP for VLESS browsing traffic? [Y/N]: " INSTALL_WARP
+
+case "$INSTALL_WARP" in
+
+    Y|y)
+
+        echo ""
+        echo -e "${YELLOW}Installing Cloudflare WARP...${NC}"
+        echo ""
+
+        # ----------------------------------------------------
+        # Install prerequisites
+        # ----------------------------------------------------
+
+        apt-get update -y
+        apt-get install -y curl gnupg ca-certificates
+
+        # ----------------------------------------------------
+        # Install Cloudflare WARP repository
+        # ----------------------------------------------------
+
+        echo -e "${YELLOW}Adding Cloudflare WARP repository...${NC}"
+
+        mkdir -p /usr/share/keyrings
+
+        # Download key first instead of using a multiline pipe.
+        # This avoids shell paste/parsing problems.
+        curl -fsSL \
+            https://pkg.cloudflareclient.com/pubkey.gpg \
+            -o /tmp/cloudflare-warp-key.gpg
+
+        gpg --yes --dearmor \
+            -o /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg \
+            /tmp/cloudflare-warp-key.gpg
+
+        rm -f /tmp/cloudflare-warp-key.gpg
+
+        echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ noble main" \
+            > /etc/apt/sources.list.d/cloudflare-client.list
+
+        apt-get update -y
+
+        # ----------------------------------------------------
+        # Install WARP
+        # ----------------------------------------------------
+
+        if ! command -v warp-cli >/dev/null 2>&1; then
+            apt-get install -y cloudflare-warp
+        fi
+
+        echo -e "${GREEN}Cloudflare WARP installed.${NC}"
+        echo ""
+
+        # ----------------------------------------------------
+        # Enable WARP service
+        # ----------------------------------------------------
+
+        systemctl enable warp-svc >/dev/null 2>&1
+        systemctl start warp-svc
+
+        sleep 3
+
+        if ! systemctl is-active --quiet warp-svc; then
+            echo -e "${RED}WARP service failed to start.${NC}"
+            systemctl status warp-svc --no-pager
+            exit 1
+        fi
+
+        echo -e "${GREEN}WARP service is running.${NC}"
+        echo ""
+
+        # ----------------------------------------------------
+        # Register WARP
+        # ----------------------------------------------------
+
+        echo -e "${YELLOW}Registering WARP...${NC}"
+
+        if ! warp-cli --accept-tos registration show >/dev/null 2>&1; then
+            warp-cli --accept-tos registration new
+        fi
+
+        echo -e "${GREEN}WARP registration completed.${NC}"
+        echo ""
+
+        # ----------------------------------------------------
+        # IMPORTANT:
+        # Use WARP LOCAL PROXY mode.
+        #
+        # This does NOT replace the VPS default route.
+        # Therefore SSH and VPS connectivity remain normal.
+        # ----------------------------------------------------
+
+        echo -e "${YELLOW}Configuring WARP local proxy mode...${NC}"
+
+        warp-cli --accept-tos tunnel protocol set MASQUE >/dev/null 2>&1 || true
+
+        warp-cli --accept-tos mode proxy
+
+        # Default WARP proxy port is 40000.
+        WARP_PROXY_PORT=40000
+
+        warp-cli --accept-tos proxy port "$WARP_PROXY_PORT" >/dev/null 2>&1 || true
+
+        echo -e "${GREEN}WARP proxy mode configured.${NC}"
+        echo ""
+
+        # ----------------------------------------------------
+        # Connect WARP
+        # ----------------------------------------------------
+
+        echo -e "${YELLOW}Connecting WARP...${NC}"
+
+        warp-cli --accept-tos connect
+
+        # Give WARP time to establish the tunnel.
+        sleep 8
+
+        WARP_STATUS="$(warp-cli --accept-tos status 2>/dev/null || true)"
+
+        echo ""
+        echo "$WARP_STATUS"
+        echo ""
+
+        if ! echo "$WARP_STATUS" | grep -qi "Connected"; then
+
+            echo -e "${RED}WARP failed to connect.${NC}"
+            echo ""
+            echo -e "${YELLOW}WARP diagnostics:${NC}"
+            warp-cli --accept-tos status || true
+            echo ""
+            echo -e "${YELLOW}WARP service:${NC}"
+            systemctl status warp-svc --no-pager || true
+            echo ""
+
+            exit 1
+        fi
+
+        echo -e "${GREEN}WARP is connected.${NC}"
+        echo ""
+
+        # ----------------------------------------------------
+        # Verify WARP SOCKS5 proxy
+        # ----------------------------------------------------
+
+        echo -e "${YELLOW}Testing WARP proxy...${NC}"
+
+        WARP_IP=$(curl -4 \
+            --silent \
+            --show-error \
+            --max-time 15 \
+            --proxy "socks5h://127.0.0.1:${WARP_PROXY_PORT}" \
+            https://api.ipify.org || true)
+
+        if [ -z "$WARP_IP" ]; then
+
+            echo -e "${RED}WARP proxy test failed.${NC}"
+            echo ""
+            echo "Check:"
+            echo "  warp-cli settings"
+            echo "  warp-cli status"
+            echo "  ss -lntp | grep ${WARP_PROXY_PORT}"
+            echo ""
+            exit 1
+
+        fi
+
+        echo -e "${GREEN}WARP proxy is working.${NC}"
+        echo -e "${GREEN}WARP exit IP: ${WARP_IP}${NC}"
+        echo ""
+
+        # ----------------------------------------------------
+        # IMPORTANT:
+        # Replace Xray's normal freedom outbound with a SOCKS
+        # outbound pointing to the local WARP proxy.
+        #
+        # This means ONLY Xray traffic uses WARP.
+        # ----------------------------------------------------
+
+        echo -e "${YELLOW}Configuring Xray to use WARP...${NC}"
+
+        cp "$XRAY_CONFIG" "${XRAY_CONFIG}.before-warp"
+
+        jq \
+          --arg port "$WARP_PROXY_PORT" \
+          '
+          .outbounds = [
+            {
+              "protocol": "socks",
+              "settings": {
+                "servers": [
+                  {
+                    "address": "127.0.0.1",
+                    "port": ($port | tonumber)
+                  }
+                ]
+              },
+              "tag": "warp"
+            }
+          ]
+          ' "$XRAY_CONFIG" > "${XRAY_CONFIG}.tmp"
+
+        mv "${XRAY_CONFIG}.tmp" "$XRAY_CONFIG"
+
+        # ----------------------------------------------------
+        # Validate Xray configuration
+        # ----------------------------------------------------
+
+        echo -e "${YELLOW}Validating Xray configuration...${NC}"
+
+        if ! xray run -test -config "$XRAY_CONFIG" >/tmp/xray-config-test.log 2>&1; then
+
+            echo -e "${RED}Xray configuration validation failed.${NC}"
+            echo ""
+
+            cat /tmp/xray-config-test.log
+
+            echo ""
+            echo -e "${YELLOW}Restoring previous Xray configuration...${NC}"
+
+            cp "${XRAY_CONFIG}.before-warp" "$XRAY_CONFIG"
+
+            systemctl restart xray
+
+            exit 1
+        fi
+
+        echo -e "${GREEN}Xray configuration is valid.${NC}"
+        echo ""
+
+        # ----------------------------------------------------
+        # Restart Xray
+        # ----------------------------------------------------
+
+        systemctl restart xray
+
+        sleep 3
+
+        if systemctl is-active --quiet xray; then
+            echo -e "${GREEN}Xray is running with WARP outbound.${NC}"
+        else
+
+            echo -e "${RED}Xray failed after WARP configuration.${NC}"
+            echo ""
+            echo -e "${YELLOW}Restoring previous configuration...${NC}"
+
+            cp "${XRAY_CONFIG}.before-warp" "$XRAY_CONFIG"
+            systemctl restart xray
+
+            echo -e "${GREEN}Previous Xray configuration restored.${NC}"
+
+            exit 1
+        fi
+
+        echo ""
+
+        # ----------------------------------------------------
+        # Verify VPS normal public IP is still reachable
+        # ----------------------------------------------------
+
+        NORMAL_IP=$(curl -4 \
+            --silent \
+            --show-error \
+            --max-time 10 \
+            https://api.ipify.org || true)
+
+        echo -e "${GREEN}VPS normal public IP: ${NORMAL_IP}${NC}"
+        echo -e "${GREEN}WARP proxy exit IP  : ${WARP_IP}${NC}"
+        echo ""
+
+        # ----------------------------------------------------
+        # Final WARP information
+        # ----------------------------------------------------
+
+        echo -e "${CYAN}=============================================${NC}"
+        echo -e "${CYAN}       WARP + XRAY CONFIGURATION COMPLETE${NC}"
+        echo -e "${CYAN}=============================================${NC}"
+        echo ""
+
+        echo -e "${GREEN}WARP status       : CONNECTED${NC}"
+        echo -e "${GREEN}WARP proxy        : 127.0.0.1:${WARP_PROXY_PORT}${NC}"
+        echo -e "${GREEN}WARP exit IP      : ${WARP_IP}${NC}"
+        echo -e "${GREEN}VPS public IP     : ${NORMAL_IP}${NC}"
+        echo ""
+        echo -e "${GREEN}VLESS traffic     : Xray -> WARP -> Internet${NC}"
+        echo -e "${GREEN}SSH/system traffic: Normal VPS route${NC}"
+        echo ""
+
+        ;;
+
+    N|n)
+
+        echo ""
+        echo -e "${GREEN}WARP installation skipped.${NC}"
+        echo -e "${GREEN}VLESS remains configured normally.${NC}"
+        echo ""
+
+        ;;
+
+    *)
+
+        echo ""
+        echo -e "${RED}Invalid choice. Please enter Y or N.${NC}"
+        echo ""
+        exit 1
+        ;;
+
+esac
+
+# ============================================================
+# FINAL: ALL INSTALLED PROTOCOLS + CLIENT LINKS
+# ============================================================
+
+echo ""
+echo -e "${CYAN}=============================================${NC}"
+echo -e "${CYAN}          SETUP FINISHED SUCCESSFULLY${NC}"
+echo -e "${CYAN}=============================================${NC}"
+echo ""
+
+echo -e "${GREEN}Server IP     :${NC} $PUBLIC_IP"
+echo -e "${GREEN}Server Address:${NC} $SERVER_ADDRESS"
+echo ""
+
+echo -e "${CYAN}--------------- INSTALLED PROTOCOLS ---------------${NC}"
+echo ""
+
+echo -e "${GREEN}[1] VLESS + Reality (TCP 443)${NC}"
+echo -e "${YELLOW}Client Link:${NC}"
+echo "$VLESS_LINK"
+echo ""
+
+if [ -n "${XHTTP_LINK:-}" ]; then
+    echo -e "${GREEN}[2] VLESS + Reality + XHTTP (TCP 8443)${NC}"
+    echo -e "${YELLOW}Client Link:${NC}"
+    echo "$XHTTP_LINK"
+    echo ""
+else
+    echo -e "${YELLOW}[2] VLESS + Reality + XHTTP${NC}: Not installed"
+    echo ""
+fi
+
+if [ -n "${HY2_LINK:-}" ]; then
+    echo -e "${GREEN}[3] Hysteria 2 (UDP 8443)${NC}"
+    echo -e "${YELLOW}Client Link:${NC}"
+    echo "$HY2_LINK"
+    echo ""
+else
+    echo -e "${YELLOW}[3] Hysteria 2${NC}: Not installed"
+    echo ""
+fi
+
+if [ -n "${TROJAN_LINK:-}" ]; then
+    echo -e "${GREEN}[4] Trojan + TLS (TCP 2053)${NC}"
+    echo -e "${YELLOW}Client Link:${NC}"
+    echo "$TROJAN_LINK"
+    echo ""
+else
+    echo -e "${YELLOW}[4] Trojan + TLS${NC}: Not installed"
+    echo ""
+fi
+
+# Save only the client links in one convenient file.
+ALL_LINKS_FILE="/root/all-client-links.txt"
+
+cat > "$ALL_LINKS_FILE" <<EOF
+VLESS + Reality (TCP 443):
+$VLESS_LINK
+EOF
+
+if [ -n "${XHTTP_LINK:-}" ]; then
+    cat >> "$ALL_LINKS_FILE" <<EOF
+
+VLESS + Reality + XHTTP (TCP 8443):
+$XHTTP_LINK
+EOF
+fi
+
+if [ -n "${HY2_LINK:-}" ]; then
+    cat >> "$ALL_LINKS_FILE" <<EOF
+
+Hysteria 2 (UDP 8443):
+$HY2_LINK
+EOF
+fi
+
+if [ -n "${TROJAN_LINK:-}" ]; then
+    cat >> "$ALL_LINKS_FILE" <<EOF
+
+Trojan + TLS (TCP 2053):
+$TROJAN_LINK
+EOF
+fi
+
+chmod 600 "$ALL_LINKS_FILE"
+
+echo -e "${CYAN}--------------------------------------------------${NC}"
+echo -e "${GREEN}All installed client links saved to:${NC}"
+echo -e "${GREEN}$ALL_LINKS_FILE${NC}"
+echo ""
+echo -e "${YELLOW}Important: the links above contain credentials. Keep them private.${NC}"
 echo ""
 echo -e "${GREEN}Setup is complete.${NC}"
+echo ""
